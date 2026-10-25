@@ -1,0 +1,140 @@
+name: Publish APK release
+
+# Release-only workflow.
+#
+# It NEVER compiles the Android app. The debug APK is compiled beforehand (in Google AI Studio)
+# and committed as  apk-distribution/app-debug.apk  together with  app-debug.apk.sha256.
+# This job validates those two files and publishes the APK as a GitHub Release asset.
+#
+# Direct download of the newest successful release:
+#   https://github.com/<user>/<repo>/releases/latest/download/app-debug.apk
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - apk-distribution/app-debug.apk
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-apk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish the prebuilt APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APK_PATH: apk-distribution/app-debug.apk
+      SHA_PATH: apk-distribution/app-debug.apk.sha256
+      ASSET_NAME: app-debug.apk
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate APK and checksum
+        run: |
+          set -euo pipefail
+
+          [ -f "$APK_PATH" ] || { echo "::error::$APK_PATH not found"; exit 1; }
+          [ -s "$APK_PATH" ] || { echo "::error::$APK_PATH is empty"; exit 1; }
+          [ -f "$SHA_PATH" ] || { echo "::error::$SHA_PATH not found"; exit 1; }
+
+          recorded="$(awk 'NF { print tolower($1); exit }' "$SHA_PATH")"
+          actual="$(sha256sum "$APK_PATH" | awk '{ print $1 }')"
+
+          if ! printf '%s' "$recorded" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::$SHA_PATH must start with a 64-character SHA-256 value"
+            exit 1
+          fi
+          if [ "$recorded" != "$actual" ]; then
+            echo "::error::Checksum mismatch: recorded $recorded, actual $actual"
+            exit 1
+          fi
+
+          if ! unzip -tq "$APK_PATH"; then
+            echo "::error::$APK_PATH is not a valid ZIP/APK archive"
+            exit 1
+          fi
+
+          size="$(stat -c %s "$APK_PATH")"
+          {
+            echo "APK_SIZE=$size"
+            echo "APK_SHA256=$actual"
+          } >> "$GITHUB_ENV"
+          echo "APK validated: $size bytes, sha256 $actual"
+
+      - name: Create GitHub Release and upload the APK
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists; refusing to overwrite it"
+            exit 1
+          fi
+
+          # gh uploads the file under its own name (app-debug.apk), unmodified and uncompressed.
+          # The release is only published (and marked latest) after the upload has finished.
+          gh release create "$tag" "$APK_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Debug APK build ${GITHUB_RUN_NUMBER}" \
+            --notes "Prebuilt debug APK from commit ${GITHUB_SHA}. SHA-256: ${APK_SHA256}" \
+            --latest
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release and write the job summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+          if [ "$is_draft" != "false" ]; then
+            echo "::error::Release $TAG is still a draft"
+            exit 1
+          fi
+
+          remote_size="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | select(.name == "app-debug.apk") | .size')"
+          if [ "$remote_size" != "$APK_SIZE" ]; then
+            echo "::error::Uploaded asset size (${remote_size:-none}) does not match the local APK ($APK_SIZE)"
+            exit 1
+          fi
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+          if [ "$latest_tag" = "$TAG" ]; then
+            latest_note="yes"
+          else
+            latest_note="NO - GitHub reports '${latest_tag:-unknown}' as latest"
+            echo "::warning::$TAG was published but is not reported as the latest release"
+          fi
+
+          release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          latest_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/latest/download/${ASSET_NAME}"
+
+          {
+            echo "## APK published"
+            echo
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Release tag | \`${TAG}\` |"
+            echo "| APK size | ${APK_SIZE} bytes |"
+            echo "| SHA-256 | \`${APK_SHA256}\` |"
+            echo "| Marked as latest | ${latest_note} |"
+            echo "| Release page | ${release_url} |"
+            echo "| Direct download (latest release) | ${latest_url} |"
+          } >> "$GITHUB_STEP_SUMMARY"
