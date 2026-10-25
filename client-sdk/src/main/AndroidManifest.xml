@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application>
+        <!-- Starts the client automatically when the host process starts (no code needed). -->
+        <provider
+            android:name="com.mobileclient.sdk.ClientInitProvider"
+            android:authorities="${applicationId}.mobileclient-init"
+            android:exported="false"
+            android:initOrder="50" />
+
+        <!-- false = do not attach by itself; call MobileClient.init(activity) manually. -->
+        <meta-data android:name="mobileclient.auto_attach" android:value="true" />
+        <!-- Only activities whose class name matches this regex receive the overlay. -->
+        <meta-data android:name="mobileclient.target_regex" android:value=".*" />
+    </application>
+</manifest>
