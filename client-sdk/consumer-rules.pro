@@ -1,0 +1,4 @@
+-keep class com.mobileclient.sdk.MobileClient { *; }
+-keep class com.mobileclient.sdk.NativeBridge { native <methods>; }
+-keep class com.mobileclient.sdk.ClientInitProvider { <init>(); }
+-keep class com.mobileclient.sdk.core.** { *; }
